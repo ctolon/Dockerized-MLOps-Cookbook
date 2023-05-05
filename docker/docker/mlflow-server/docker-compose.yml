@@ -1,0 +1,112 @@
+version: '3'
+
+networks:
+  net:
+    driver: bridge
+
+services:
+  postgresql-mlflow:
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile
+      args:
+        - POSTGRESQL_VERSION=$POSTGRESQL_VERSION
+        #- POSTGRES_USER=$POSTGRES_USER
+    image: postgresql-mlflow
+    container_name: postgresql-mlflow
+    user: postgres
+    hostname: postgresql
+    environment:
+      - PGDATA=$POSTGRES_PATH
+      #- POSTGRES_USER=$POSTGRES_USER
+      - POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+      - POSTGRES_HOST_AUTH_METHOD=$POSTGRES_HOST_AUTH_METHOD
+      - COMPOSE_HTTP_TIMEOUT=120
+    ports:
+      - "3307:3306"
+    volumes:
+      - $PWD/postgres/init:/docker-entrypoint-initdb.d
+    restart: on-failure
+    cap_add: 
+      - SYS_NICE # CAP_SYS_NICE
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready", "-d", "mlflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    networks:
+      net:
+
+  mlflow-tracking:
+    build:
+      context: ./mlflow-tracking
+      dockerfile: Dockerfile
+      args:
+        - MLFLOW_ARTIFACT_DIR=$MLFLOW_ARTIFACT_DIR
+        - MLFLOW_TRACKING_URI=$MLFLOW_TRACKING_URI
+        - MLFLOW_TRACKING_INSECURE_TLS=$MLFLOW_TRACKING_INSECURE_TLS
+        #- MLFLOW_TRACKING_PASSWORD=$MLFLOW_TRACKING_PASSWORD
+        #- MLFLOW_TRACKING_USERNAME=$MLFLOW_TRACKING_USERNAME
+    container_name: mlflow-tracking
+    image: mlflow-tracking
+    hostname: mlflow-tracking
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      #- MLFLOW_ARTIFACT_URI=${MLFLOW_ARTIFACT_DIR}
+      - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL}
+      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+      - MLFLOW_TRACKING_INSECURE_TLS=${MLFLOW_TRACKING_INSECURE_TLS}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      #- MLFLOW_TRACKING_USERNAME=${MLFLOW_TRACKING_USERNAME}
+      #- MLFLOW_TRACKING_PASSWORD=${MLFLOW_TRACKING_PASSWORD}
+    depends_on:
+      - postgresql-mlflow
+      - minio
+    links:
+      - "postgresql-mlflow:postgresql-mlflow"
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_tracking_vol:/mlartifacts/mlruns
+    command: >
+      /bin/bash -c "sleep 3
+      && mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri postgresql+psycopg2://postgres:postgreadmin@postgresql/mlflow?sslmode=disable --default-artifact-root s3://mlflow/ --expose-prometheus /temp/prometheus_metrics"
+    restart: on-failure
+    networks:
+      net:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:5000"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    hostname: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${AWS_ACCESS_KEY_ID}
+      - MINIO_ROOT_PASSWORD=${AWS_SECRET_ACCESS_KEY}
+    depends_on:
+      - postgresql-mlflow
+    links:
+      - "postgresql-mlflow:postgresql-mlflow"
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ':9001' --address ':9000'
+    restart: always
+    networks:
+      net:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+volumes:
+  minio_data:
+  mlflow_tracking_vol:
